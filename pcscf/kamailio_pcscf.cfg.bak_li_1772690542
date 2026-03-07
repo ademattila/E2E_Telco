@@ -18,8 +18,6 @@ import_file "pcscf.cfg"
 #!define FLT_NAT 3
 #!define FLT_RTP 4
 #!define FLT_CAPTURE 5
-#!define CAPTURE_NODE "sip:10.0.0.2:9060;transport=tcp"
-
 
 ####### Global Parameters #########
 debug=2
@@ -80,7 +78,7 @@ system.service = "Proxy-CSCF" desc "Function of this server"
 
 ####### Modules Section ########
 
-mpath="/mnt/pcscf/:/usr/lib64/kamailio/modules_k/:/usr/lib64/kamailio/modules/:/usr/lib/kamailio/modules_k/:/usr/lib/kamailio/modules/:/usr/lib/x86_64-linux-gnu/kamailio/modules/:/usr/local/lib64/kamailio/modules"
+mpath="/usr/lib64/kamailio/modules_k/:/usr/lib64/kamailio/modules/:/usr/lib/kamailio/modules_k/:/usr/lib/kamailio/modules/:/usr/lib/x86_64-linux-gnu/kamailio/modules/:/usr/local/lib64/kamailio/modules"
 
 loadmodule "kex.so"
 loadmodule "corex.so"
@@ -223,7 +221,6 @@ modparam("rtpengine", "extra_id_pv", "$avp(extra_id)")
 
 modparam("path", "use_received", 1)
 modparam("ctl", "binrpc", "unix:/var/run/kamailio/kamailio_ctl")
-modparam("ctl", "binrpc", "tcp:0.0.0.0:2049")
 
 modparam("dispatcher", "list_file", "/etc/kamailio_pcscf/dispatcher.list")
 modparam("dispatcher", "flags", 2)
@@ -297,7 +294,6 @@ modparam("http_client", "httpredirect", 1)
 modparam("http_client", "useragent", "AF")
 modparam("http_client", "maxdatasize", 64535)
 modparam("http_client", "connection_timeout", 2)
-modparam("http_client", "httpcon", "li_agent=>http://172.22.0.1:9091/")
 modparam("http_client", "keep_connections", 1)
 modparam("http_client", "response_headers", 1)
 modparam("http_client", "query_result", 1)
@@ -337,8 +333,6 @@ modparam("siptrace", "trace_on", 1)
 modparam("siptrace", "trace_to_database", 0)
 modparam("siptrace", "trace_flag", FLT_CAPTURE)
 modparam("siptrace", "hep_mode_on", 1)
-modparam("siptrace", "hep_version", 3)
-modparam("siptrace", "hep_capture_id", 1)
 #!endif
 
 modparam("statistics", "variable", "register_success")
@@ -662,28 +656,23 @@ route[LI_SYNC] {
 
 
 route[LI_CHECK] {
-    if (!is_method("INVITE|BYE|REGISTER|UPDATE")) return;
-    $var(li_match) = 0;
+    if (!is_method("INVITE")) return;
+
     if ($sht(li_watchlist=>$fU) != $null) {
         xlog("L_ALERT", "LI TARGET CALLER: $fU, Call-ID: $ci\n");
-        $var(li_match) = 1;
+        setflag(22);
     }
+
     if ($sht(li_watchlist=>$tU) != $null) {
         xlog("L_ALERT", "LI TARGET CALLEE: $tU, Call-ID: $ci\n");
-        $var(li_match) = 1;
-    }
-    if ($var(li_match) == 1) {
-        $var(li_corr_id) = $ci;
-        xlog("L_ALERT", "LI ACTIVATED: $fU->$tU corr=$var(li_corr_id)\n");
-        $dlg_var(li_record) = "yes";
-        $dlg_var(li_corr_id) = $var(li_corr_id);
         setflag(22);
-#!ifdef CAPTURE_NODE
-        setflag(FLT_CAPTURE);
-        sip_trace();
-#!endif
-        if (is_method("INVITE") && has_body("application/sdp")) {
-            rtpengine_manage("record-call=yes label=$var(li_corr_id)");
+    }
+
+    if (isflagset(22)) {
+        xlog("L_ALERT", "LI RECORDING ACTIVATED: Call-ID=$ci, $fU->$tU\n");
+        $dlg_var(li_record) = "yes";
+        if (has_body("application/sdp")) {
+            rtpengine_manage("record-call=yes");
         }
     }
 }

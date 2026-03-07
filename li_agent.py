@@ -156,6 +156,49 @@ def build_answer_sdp(offer_sdp, ip, port):
         else: lines.append(line)
     return '\r\n'.join(lines) + '\r\n'
 
+# ─── RTPEngine Session Poller (X3 otomatik mirror) ────────────────────────────
+_subscribed_sessions = set()
+
+def cli_list_sessions():
+    """RTPEngine CLI 9901 ile aktif session ID listesi al"""
+    try:
+        import socket as _s
+        sock = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+        sock.settimeout(3)
+        sock.connect((RTPENGINE_IP, 9901))
+        sock.sendall(b"list sessions own\n")
+        import time; time.sleep(0.5)
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk: break
+            data += chunk
+        sock.close()
+        sessions = []
+        for line in data.decode(errors="replace").splitlines():
+            if line.startswith("ID:"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    sessions.append(parts[1])
+        return sessions
+    except Exception as e:
+        log.error(f"CLI list error: {e}"); return []
+
+def rtpengine_poller():
+    log.info("RTPEngine poller başladı (2s interval)")
+    while True:
+        try:
+            sessions = cli_list_sessions()
+            for call_id in sessions:
+                if call_id not in _subscribed_sessions:
+                    log.info(f"Poller: yeni session {call_id}, X3 subscribe başlatılıyor")
+                    if start_x3_mirror(call_id, ""):
+                        _subscribed_sessions.add(call_id)
+        except Exception as e:
+            log.error(f"Poller hata: {e}")
+        import time; time.sleep(2)
+
+
 def start_x3_mirror(call_id, from_tag):
     log.info(f'X3/HI3: Subscribing {call_id} -> {MEDIATION_IP}:{MEDIATION_X3}')
     resp = ng_send({'command':'subscribe request','call-id':call_id,
@@ -283,6 +326,7 @@ def main():
     p.add_argument('--x3-port',      default=2049, type=int)
     p.add_argument('--rtpengine',    default='172.22.0.16:2223')
     p.add_argument('--listen',       default='0.0.0.0:9091')
+    p.add_argument('--hep-port',     default=9062, type=int)
     a = p.parse_args()
 
     global DB_HOST, DB_USER, DB_PASS, DB_NAME
@@ -310,7 +354,112 @@ def main():
     except Exception as e:
         log.error(f'DB bağlantı hatası: {e}')
 
+    threading.Thread(target=start_hep_listener, daemon=True, args=('0.0.0.0', a.hep_port)).start()
+    threading.Thread(target=rtpengine_poller, daemon=True).start()
     HTTPServer((listen_ip, int(listen_port)), LIAgentHandler).serve_forever()
 
+# ─── HEP3 TCP Listener ────────────────────────────────────────────────────────
+import struct
+
+def parse_hep3(data):
+    try:
+        if data[:4] != b'HEP3':
+            return None
+        idx = 6
+        chunks = {}
+        while idx < len(data):
+            if idx + 6 > len(data): break
+            vendor = struct.unpack('!H', data[idx:idx+2])[0]
+            chunk_type = struct.unpack('!H', data[idx+2:idx+4])[0]
+            chunk_len = struct.unpack('!H', data[idx+4:idx+6])[0]
+            if chunk_len < 6: break
+            chunks[chunk_type] = data[idx+6:idx+chunk_len]
+            idx += chunk_len
+        call_id = chunks.get(0x0011, b'').decode('utf-8', errors='replace')
+        sip_msg = chunks.get(0x000f, b'').decode('utf-8', errors='replace')
+        return {'call_id': call_id, 'sip': sip_msg}
+    except Exception as e:
+        log.error(f'HEP3 parse error: {e}')
+        return None
+
+def handle_hep_client(conn, addr):
+    try:
+        data = b''
+        while True:
+            chunk = conn.recv(65535)
+            if not chunk: break
+            data += chunk
+            while len(data) > 6:
+                total_len = struct.unpack('!H', data[4:6])[0]
+                if len(data) < total_len: break
+                hep = parse_hep3(data[:total_len])
+                data = data[total_len:]
+                if not hep or not hep['call_id']: continue
+                call_id = hep['call_id']
+                sip = hep['sip']
+                method = sip.split(' ')[0] if sip else 'UNKNOWN'
+                from_user, to_user, from_tag = '', '', ''
+                for line in sip.split('\n'):
+                    if line.startswith('From:') and not from_user:
+                        m = re.search(r'sip:([^@>]+)@', line)
+                        if m: from_user = m.group(1)
+                        m2 = re.search(r'tag=([^\s;]+)', line)
+                        if m2: from_tag = m2.group(1)
+                    if line.startswith('To:') and not to_user:
+                        m = re.search(r'sip:([^@>]+)@', line)
+                        if m: to_user = m.group(1)
+                targets = db_get_targets()
+                target_numbers = [t['phone_number'] for t in targets]
+                if from_user in target_numbers or to_user in target_numbers:
+                    log.info(f'HEP LI match: {from_user}->{to_user} call_id={call_id} method={method}')
+                    threading.Thread(target=send_iri, daemon=True,
+                        args=(sip, call_id, method, from_user, to_user)).start()
+                    if method == 'INVITE' and from_tag:
+                        threading.Thread(target=start_x3_mirror, daemon=True,
+                            args=(call_id, from_tag)).start()
+    except Exception as e:
+        log.error(f'HEP client error: {e}')
+    finally:
+        conn.close()
+
+def start_hep_listener(host='0.0.0.0', port=9060):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((host, port))
+    log.info(f'HEP3 UDP dinleyici: {host}:{port}')
+    while True:
+        data, addr = srv.recvfrom(65535)
+        threading.Thread(target=handle_hep_udp, daemon=True, args=(data, addr)).start()
+
+def handle_hep_udp(data, addr):
+    try:
+        hep = parse_hep3(data)
+        if not hep or not hep["call_id"]: return
+        call_id = hep["call_id"]
+        sip = hep["sip"]
+        method = sip.split(" ")[0] if sip else "UNKNOWN"
+        from_user, to_user, from_tag = "", "", ""
+        for line in sip.split("\n"):
+            if line.startswith("From:") and not from_user:
+                m = re.search(r"sip:([^@>]+)@", line)
+                if m: from_user = m.group(1)
+                m2 = re.search(r"tag=([^\s;]+)", line)
+                if m2: from_tag = m2.group(1)
+            if line.startswith("To:") and not to_user:
+                m = re.search(r"sip:([^@>]+)@", line)
+                if m: to_user = m.group(1)
+        targets = db_get_targets()
+        target_numbers = [t["phone_number"] for t in targets]
+        if from_user in target_numbers or to_user in target_numbers:
+            log.info(f"HEP LI match: {from_user}->{to_user} call_id={call_id} method={method}")
+            threading.Thread(target=send_iri, daemon=True,
+                args=(sip, call_id, method, from_user, to_user)).start()
+            if method == "INVITE" and from_tag:
+                threading.Thread(target=start_x3_mirror, daemon=True,
+                    args=(call_id, from_tag)).start()
+    except Exception as e:
+        log.error(f"HEP UDP error: {e}")
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     main()

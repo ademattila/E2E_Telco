@@ -51,7 +51,7 @@ export EPDG_ROUTING_TABLE_NAME=epdg
 
 sed -i 's|OSMOEPDG_IP|'$OSMOEPDG_IP'|g' /etc/osmocom/osmo-epdg.config
 sed -i 's|OSMOEPDG_COMMA_SEPARATED_IP|'$OSMOEPDG_COMMA_SEPARATED_IP'|g' /etc/osmocom/osmo-epdg.config
-sed -i 's|HSS_IP|'$HSS_IP'|g' /etc/osmocom/osmo-epdg.config
+sed -i 's|HSS_IP|'$PYHSS_IP'|g' /etc/osmocom/osmo-epdg.config
 sed -i 's|EPC_DOMAIN|'$EPC_DOMAIN'|g' /etc/osmocom/osmo-epdg.config
 sed -i 's|SMF_IP|'$SMF_IP'|g' /etc/osmocom/osmo-epdg.config
 sed -i 's|EPDG_TUN_INTERFACE|'$EPDG_TUN_INTERFACE'|g' /etc/osmocom/osmo-epdg.config

@@ -517,6 +517,42 @@ services:
     networks:
       default:
         ipv4_address: ${GRAFANA_IP}
+
+  osmoepdg:
+    image: docker_osmoepdg
+    container_name: osmoepdg
+    env_file:
+      - .env
+    volumes:
+      - ./osmoepdg:/mnt/osmoepdg
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    cap_add:
+      - NET_ADMIN
+    privileged: true
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.rp_filter=0
+      - net.ipv4.conf.default.rp_filter=0
+    depends_on:
+      - dns
+      - pyhss
+      - smf
+      - upf
+    expose:
+      - "3868/tcp"
+      - "3868/sctp"
+      - "2123/udp"
+      - "500/udp"
+      - "4500/udp"
+    ports:
+      - "${DOCKER_HOST_IP}:500:500/udp"
+      - "${DOCKER_HOST_IP}:4500:4500/udp"
+    networks:
+      default:
+        ipv4_address: ${OSMOEPDG_IP}
+
+
 networks:
   default:
     name: docker_open5gs_default

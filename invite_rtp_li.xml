@@ -43,10 +43,9 @@ Content-Length: 0
 
     ]]>
   </send>
-  <pause milliseconds="2000"/>
   <nop>
     <action>
-      <exec play_pcap_audio="/tmp/g711.pcap"/>
+      <exec play_pcap_audio="/tmp/alo.pcap"/>
     </action>
   </nop>
   <pause milliseconds="5000"/>
